@@ -1,0 +1,13 @@
+{
+  "name": "retail-saas-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-Tenant Retail POS, Inventory and Real-Time Analytics SaaS Platform",
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:backend": "npm --prefix backend run build",
+    "build:frontend": "npm --prefix frontend run build"
+  }
+}
+

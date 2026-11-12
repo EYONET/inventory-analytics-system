@@ -1,0 +1,263 @@
+// Multi-Tenant Retail Inventory, POS & Real-Time Analytics Platform
+// Optimized for Supabase PostgreSQL (with direct pooling via Supavisor)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum StoreStatus {
+  ACTIVE
+  TRIAL
+  SUSPENDED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  STORE_ADMIN
+  CASHIER
+}
+
+enum MovementType {
+  INITIAL
+  PURCHASE
+  SALE
+  DAMAGE
+  RETURN
+  ADJUSTMENT
+}
+
+enum OrderStatus {
+  COMPLETED
+  VOID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  TELEBIRR
+  CBE_BIRR
+  MPESA
+  CARD
+  STORE_CREDIT
+}
+
+enum SubscriptionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// -------------------------------------------------------------
+// Multi-Tenant Store & Subscription Models
+// -------------------------------------------------------------
+
+model Store {
+  id                    String        @id @default(uuid())
+  name                  String
+  slug                  String        @unique
+  phone                 String?
+  address               String?
+  currency              String        @default("ETB")
+  status                StoreStatus   @default(TRIAL)
+  trialEndsAt           DateTime?
+  subscriptionExpiresAt DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  users                 User[]
+  products              Product[]
+  stockMovements        StockMovement[]
+  salesOrders           SalesOrder[]
+  subscriptions         Subscription[]
+  auditLogs             AuditLog[]
+
+  @@map("stores")
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  storeId          String
+  amount           Float              // e.g. 800.00 ETB
+  billingCycle     String             @default("MONTHLY") // MONTHLY | ANNUAL
+  paymentMethod    PaymentMethod      @default(TELEBIRR)
+  paymentReference String?            // Telebirr / CBE transaction confirmation code
+  status           SubscriptionStatus @default(PENDING)
+  periodStart      DateTime?
+  periodEnd        DateTime?
+  notes            String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  store            Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@map("subscriptions")
+}
+
+// -------------------------------------------------------------
+// User & Authentication Models
+// -------------------------------------------------------------
+
+model User {
+  id           String      @id @default(uuid())
+  storeId      String?     // Nullable for SUPER_ADMIN
+  email        String      @unique
+  phone        String?
+  passwordHash String
+  name         String
+  role         UserRole    @default(CASHIER)
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  store        Store?      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  salesOrders  SalesOrder[]
+  auditLogs    AuditLog[]
+
+  @@index([storeId])
+  @@map("users")
+}
+
+// -------------------------------------------------------------
+// Product & Inventory Models (Tenant-Scoped)
+// -------------------------------------------------------------
+
+model Product {
+  id                 String          @id @default(uuid())
+  storeId            String
+  sku                String
+  barcode            String
+  name               String
+  category           String          @default("General")
+  description        String?
+  sellingPrice       Float
+  currentCostPrice   Float           // Confidential: Hidden from CASHIER role
+  currentStock       Int             @default(0)
+  lowStockThreshold  Int             @default(5)
+  isActive           Boolean         @default(true)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  store              Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  stockMovements     StockMovement[]
+  saleItems          SaleItem[]
+
+  // Composite unique constraints: Unique per store tenant!
+  @@unique([storeId, barcode])
+  @@unique([storeId, sku])
+  @@index([storeId, category])
+  @@index([storeId, name])
+  @@map("products")
+}
+
+model StockMovement {
+  id               String       @id @default(uuid())
+  storeId          String
+  productId        String
+  movementType     MovementType
+  quantityDelta    Int          // Negative for SALE, positive for PURCHASE
+  unitCostAtTime   Float        // Unit cost at this movement
+  referenceId      String?      // sales_order id, supplier invoice number, etc.
+  notes            String?
+  createdAt        DateTime     @default(now())
+
+  store            Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product          Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, productId])
+  @@index([storeId, createdAt])
+  @@map("stock_movements")
+}
+
+// -------------------------------------------------------------
+// POS Sales Orders & Payment Models
+// -------------------------------------------------------------
+
+model SalesOrder {
+  id             String       @id @default(uuid())
+  storeId        String
+  receiptNumber  String
+  cashierId      String
+  subtotal       Float
+  discountAmount Float        @default(0.0)
+  taxAmount      Float        @default(0.0)
+  grandTotal     Float
+  status         OrderStatus  @default(COMPLETED)
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  store          Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  cashier        User         @relation(fields: [cashierId], references: [id])
+  items          SaleItem[]
+  payments       Payment[]
+
+  @@unique([storeId, receiptNumber])
+  @@index([storeId, createdAt])
+  @@index([storeId, cashierId])
+  @@map("sales_orders")
+}
+
+model SaleItem {
+  id             String      @id @default(uuid())
+  orderId        String
+  productId      String
+  productName    String
+  quantity       Int
+  unitPrice      Float
+  unitCost       Float       // Stamped historical COGS at the time of sale
+  lineDiscount   Float       @default(0.0)
+  lineTotal      Float
+  createdAt      DateTime    @default(now())
+
+  order          SalesOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product        Product     @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+model Payment {
+  id            String        @id @default(uuid())
+  orderId       String
+  paymentMethod PaymentMethod @default(CASH)
+  amount        Float
+  tendered      Float         @default(0.0)
+  changeGiven   Float         @default(0.0)
+  referenceCode String?       // Telebirr, CBE, or M-Pesa transaction reference code
+  createdAt     DateTime      @default(now())
+
+  order         SalesOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("payments")
+}
+
+// -------------------------------------------------------------
+// Audit Log Model
+// -------------------------------------------------------------
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  storeId     String?
+  userId      String?
+  action      String    // PRICE_CHANGE, STOCK_ADJUST, ORDER_VOID, USER_TOGGLE
+  entityType  String    // PRODUCT, ORDER, USER, SUBSCRIPTION
+  entityId    String?
+  payloadJson String?
+  createdAt   DateTime  @default(now())
+
+  store       Store?    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user        User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([storeId, createdAt])
+  @@map("audit_logs")
+}
+
